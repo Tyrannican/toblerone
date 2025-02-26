@@ -214,14 +214,15 @@ where
 
             let bucket = &self.buckets[gidx as usize];
             let potentials = bucket.simd_hash_match(h2);
-            for slot in potentials {
-                match bucket.slots[slot] {
+            for slot in potentials.iter() {
+                match bucket.slots[*slot] {
                     Some(ref node) => {
                         if &node.value != value {
                             gidx += 1;
                             continue;
                         }
 
+                        self.remove_node(node);
                         return true;
                     }
                     None => {}
@@ -249,7 +250,7 @@ where
             return;
         }
 
-        // TODO: Probably need some custom dropping logic here but meh
+        // Probably need some custom dropping logic here but meh
         // it's just RCs all the way down
         self.head = None;
         self.tail = None;
@@ -306,8 +307,12 @@ where
         }
     }
 
-    // TODO: Start here
-    fn remove_node(&mut self) {}
+    fn remove_node(&self, node: &Rc<Node<T>>) {
+        let next = node.next.borrow_mut().take();
+        let prev = node.prev.borrow_mut().take();
+
+        if next.is_none() {}
+    }
 
     fn resize(&mut self) {
         let new_cap = match self.size {
