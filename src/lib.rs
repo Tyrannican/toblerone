@@ -207,12 +207,14 @@ where
 
         let (h1, h2) = self.hash(&value);
         let mut gidx = self.fast_mod(h1 as u32);
+
+        // TODO: Maybe extract this out into a helper?
         loop {
             if gidx as usize == self.buckets.len() {
                 return false;
             }
 
-            let bucket = &self.buckets[gidx as usize];
+            let bucket = &mut self.buckets[gidx as usize];
             let potentials = bucket.simd_hash_match(h2);
             for slot in potentials.iter() {
                 match bucket.slots[*slot] {
@@ -222,7 +224,8 @@ where
                             continue;
                         }
 
-                        self.remove_node(node);
+                        bucket.meta[*slot] = TOMB;
+                        self.size -= 1;
                         return true;
                     }
                     None => {}
@@ -307,11 +310,50 @@ where
         }
     }
 
-    fn remove_node(&self, node: &Rc<Node<T>>) {
+    fn remove_node(&mut self, node: Rc<Node<T>>) {
+        // If the node is the head
+        if self.head.as_mut().unwrap().value == node.value {
+            let next = node.next.borrow_mut().take();
+            if let Some(ref n) = next {
+                n.prev.borrow_mut().take();
+            }
+            self.head = next;
+
+            return;
+        }
+
+        // If the node is the tail
+        if self.tail.as_mut().unwrap().value == node.value {
+            let prev = node.prev.borrow_mut().take();
+            assert!(prev.is_some());
+            self.tail = Weak::upgrade(&prev.unwrap());
+            *self.tail.as_mut().unwrap().next.borrow_mut() = None;
+            return;
+        }
+
+        // If the node is the middle
         let next = node.next.borrow_mut().take();
         let prev = node.prev.borrow_mut().take();
+        assert!(next.is_some());
+        assert!(prev.is_some());
 
-        if next.is_none() {}
+        if let Some(next_ptr) = next.as_ref().and_then(|n| Some(n.clone())) {
+            *next_ptr.prev.borrow_mut() = prev.clone();
+        }
+
+        if let Some(prev_ptr) = prev.and_then(|weak_ref| Weak::upgrade(&weak_ref)) {
+            *prev_ptr.next.borrow_mut() = next.clone();
+        }
+
+        // prev  node  next
+        //  ^           ^
+        //   \         /
+        //     -------
+        //    <--//-->
+
+        // let mut prev_strong = Weak::upgrade(&prev.unwrap());
+        // *prev_strong.as_mut().unwrap().next.borrow_mut() = Some(Rc::clone(&next.unwrap()));
+        // *next.as_mut().unwrap().prev.borrow_mut() = prev;
     }
 
     fn resize(&mut self) {
