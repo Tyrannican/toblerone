@@ -153,9 +153,8 @@ where
             let bucket = &mut self.buckets[gidx as usize];
             match bucket.simd_free_slot() {
                 Some(idx) => {
-                    let bucket_node = Rc::clone(&node);
-                    bucket.slots[idx] = Some(bucket_node);
                     bucket.meta[idx] = h2;
+                    bucket.slots[idx] = Some(Rc::clone(&node));
                     self.add_node(Rc::clone(&node));
                     self.size += 1;
                     return true;
@@ -208,7 +207,6 @@ where
         let (h1, h2) = self.hash(&value);
         let mut gidx = self.fast_mod(h1 as u32);
 
-        // TODO: Maybe extract this out into a helper?
         loop {
             if gidx as usize == self.buckets.len() {
                 return false;
@@ -216,7 +214,8 @@ where
 
             let bucket = &mut self.buckets[gidx as usize];
             let potentials = bucket.simd_hash_match(h2);
-            for slot in potentials.iter() {
+            let mut found_node: Option<Rc<Node<T>>> = None;
+            'inner: for slot in potentials.iter() {
                 match bucket.slots[*slot] {
                     Some(ref node) => {
                         if &node.value != value {
@@ -224,12 +223,18 @@ where
                             continue;
                         }
 
+                        found_node = Some(Rc::clone(&node));
                         bucket.meta[*slot] = TOMB;
-                        self.size -= 1;
-                        return true;
+                        break 'inner;
                     }
                     None => {}
                 }
+            }
+
+            if let Some(node) = found_node {
+                self.remove_node(node);
+                self.size -= 1;
+                return true;
             }
 
             gidx += 1;
@@ -258,6 +263,7 @@ where
         self.head = None;
         self.tail = None;
         self.buckets = Vec::with_capacity(self.capacity);
+        self.size = 0;
     }
 
     pub fn iter(&self) -> LinkedSetIterator<'_, T> {
@@ -344,16 +350,6 @@ where
         if let Some(prev_ptr) = prev.and_then(|weak_ref| Weak::upgrade(&weak_ref)) {
             *prev_ptr.next.borrow_mut() = next.clone();
         }
-
-        // prev  node  next
-        //  ^           ^
-        //   \         /
-        //     -------
-        //    <--//-->
-
-        // let mut prev_strong = Weak::upgrade(&prev.unwrap());
-        // *prev_strong.as_mut().unwrap().next.borrow_mut() = Some(Rc::clone(&next.unwrap()));
-        // *next.as_mut().unwrap().prev.borrow_mut() = prev;
     }
 
     fn resize(&mut self) {
@@ -471,5 +467,81 @@ mod toblerone_test {
         for (item, expected) in ls.iter().zip((0..17).into_iter()) {
             assert_eq!(*item, expected);
         }
+    }
+
+    #[test]
+    fn remove_node_head() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..20 {
+            ls.insert(i as i32);
+        }
+
+        assert!(ls.remove(&0));
+        let head = ls.head.take();
+        assert_eq!(head.unwrap().value, 1);
+
+        let tail = ls.tail.take();
+        assert_eq!(tail.unwrap().value, 19);
+    }
+
+    #[test]
+    fn remove_node_tail() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..20 {
+            ls.insert(i as i32);
+        }
+
+        assert!(ls.remove(&19));
+
+        let head = ls.head.take();
+        assert_eq!(head.unwrap().value, 0);
+
+        let tail = ls.tail.take();
+        assert_eq!(tail.unwrap().value, 18);
+    }
+
+    #[test]
+    fn remove_node_middle() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..20 {
+            ls.insert(i as i32);
+        }
+
+        assert!(ls.remove(&14));
+        assert_eq!(ls.get(&14), None);
+    }
+
+    #[test]
+    fn clear() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..100_000 {
+            ls.insert(i as i32);
+        }
+
+        ls.clear();
+        assert!(ls.head.is_none());
+        assert!(ls.tail.is_none());
+        assert_eq!(ls.len(), 0);
+    }
+
+    #[test]
+    fn reuse() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..100_000 {
+            ls.insert(i as i32);
+        }
+
+        ls.clear();
+        assert!(ls.head.is_none());
+        assert!(ls.tail.is_none());
+        assert_eq!(ls.len(), 0);
+
+        ls.insert(100);
+        assert_eq!(ls.len(), 1);
+
+        assert!(ls.head.is_some());
+        assert_eq!(ls.head.unwrap().value, 100);
+        assert!(ls.tail.is_some());
+        assert_eq!(ls.tail.unwrap().value, 100);
     }
 }
