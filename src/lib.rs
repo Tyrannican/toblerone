@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     hash::{DefaultHasher, Hash, Hasher},
+    iter::Chain,
     marker::PhantomData,
     rc::{Rc, Weak},
 };
@@ -113,8 +114,9 @@ pub struct LinkedSet<T> {
 
 impl<T> LinkedSet<T>
 where
-    T: Eq + Hash + Clone,
+    T: Eq + Hash,
 {
+    #[inline]
     pub fn new() -> Self {
         Self {
             head: None,
@@ -125,6 +127,7 @@ where
         }
     }
 
+    #[inline]
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             head: None,
@@ -135,6 +138,7 @@ where
         }
     }
 
+    // FIXME: This actually isn't a set, fix this
     #[inline]
     pub fn insert(&mut self, value: T) -> bool {
         if self.should_resize() {
@@ -194,6 +198,7 @@ where
         }
     }
 
+    #[inline]
     pub fn contains(&self, value: &T) -> bool {
         self.get(value).is_some()
     }
@@ -241,18 +246,91 @@ where
         }
     }
 
+    #[inline]
+    pub fn is_disjoint(&self, other: &LinkedSet<T>) -> bool {
+        if self.len() <= other.len() {
+            self.iter().all(|v| !other.contains(v))
+        } else {
+            other.iter().all(|v| !self.contains(v))
+        }
+    }
+
+    #[inline]
+    pub fn is_subset(&self, other: &LinkedSet<T>) -> bool {
+        if self.len() <= other.len() {
+            self.iter().all(|v| other.contains(v))
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn is_superset(&self, other: &LinkedSet<T>) -> bool {
+        other.is_subset(&self)
+    }
+
+    #[inline]
+    pub fn difference<'a>(&'a self, other: &'a LinkedSet<T>) -> Difference<'a, T> {
+        Difference {
+            iter: self.iter(),
+            other,
+        }
+    }
+
+    #[inline]
+    pub fn symmetric_difference<'a>(
+        &'a self,
+        other: &'a LinkedSet<T>,
+    ) -> SymmetricDifference<'a, T> {
+        SymmetricDifference {
+            iter: self.difference(other).chain(other.difference(self)),
+        }
+    }
+
+    #[inline]
+    pub fn intersection<'a>(&'a self, other: &'a LinkedSet<T>) -> Intersection<'a, T> {
+        if self.len() <= other.len() {
+            Intersection {
+                iter: self.iter(),
+                other,
+            }
+        } else {
+            Intersection {
+                iter: other.iter(),
+                other: self,
+            }
+        }
+    }
+
+    #[inline]
+    pub fn union<'a>(&'a self, other: &'a LinkedSet<T>) -> Union<'a, T> {
+        if self.len() >= other.len() {
+            Union {
+                iter: self.iter().chain(other.difference(self)),
+            }
+        } else {
+            Union {
+                iter: other.iter().chain(self.difference(other)),
+            }
+        }
+    }
+
+    #[inline]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.size
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.size == 0
     }
 
+    #[inline]
     pub fn clear(&mut self) {
         if self.buckets.is_empty() {
             return;
@@ -266,22 +344,25 @@ where
         self.size = 0;
     }
 
-    pub fn iter(&self) -> LinkedSetIterator<'_, T> {
+    #[inline]
+    pub fn iter(&self) -> Iter<'_, T> {
         let head = match self.head {
             Some(ref node) => Some(Rc::clone(&node)),
             None => None,
         };
 
-        LinkedSetIterator {
+        Iter {
             node: head,
             _marker: std::marker::PhantomData,
         }
     }
 
+    #[inline]
     fn should_resize(&self) -> bool {
         self.buckets.is_empty() || self.size > 4 * self.capacity / 5
     }
 
+    #[inline]
     fn add_node(&mut self, node: Rc<Node<T>>) {
         if self.head.is_none() {
             self.head = Some(Rc::clone(&node));
@@ -294,6 +375,7 @@ where
         }
     }
 
+    #[inline]
     pub(crate) fn insert_with_node(&mut self, node: Rc<Node<T>>) {
         let (h1, h2) = self.hash(&node.value);
         let mut gidx = self.fast_mod(h1 as u32);
@@ -316,6 +398,7 @@ where
         }
     }
 
+    #[inline]
     fn remove_node(&mut self, node: Rc<Node<T>>) {
         // If the node is the head
         if self.head.as_mut().unwrap().value == node.value {
@@ -352,6 +435,7 @@ where
         }
     }
 
+    #[inline]
     fn resize(&mut self) {
         let new_cap = match self.size {
             0 => self.capacity,
@@ -405,14 +489,30 @@ where
     }
 }
 
-pub struct LinkedSetIterator<'a, T> {
+impl<T> PartialEq for LinkedSet<T>
+where
+    T: Eq + Hash,
+{
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        self.iter().all(|k| other.contains(k))
+    }
+}
+
+impl<T> Eq for LinkedSet<T> where T: Eq + Hash {}
+
+pub struct Iter<'a, T> {
     node: Option<Rc<Node<T>>>,
     _marker: PhantomData<&'a Node<T>>,
 }
 
-impl<'a, T> Iterator for LinkedSetIterator<'a, T> {
+impl<'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let node = self.node.as_ref()?;
         // Safety: The pointer is held by the LinkedSet and this iterator is bound to the
@@ -421,7 +521,246 @@ impl<'a, T> Iterator for LinkedSetIterator<'a, T> {
         self.node = inner.next.borrow().as_ref().map(|n| Rc::clone(&n));
         Some(&inner.value)
     }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.fold(0, |count, _| count + 1)
+    }
+
+    #[inline]
+    fn fold<B, F>(mut self, init: B, mut f: F) -> B
+    where
+        Self: Sized,
+        F: FnMut(B, Self::Item) -> B,
+    {
+        let mut accum = init;
+        while let Some(x) = self.next() {
+            accum = f(accum, x);
+        }
+
+        accum
+    }
 }
+
+impl<'a, T> Clone for Iter<'a, T> {
+    fn clone(&self) -> Self {
+        Self {
+            node: self.node.clone(),
+            _marker: self._marker.clone(),
+        }
+    }
+}
+
+impl<T> Extend<T> for LinkedSet<T>
+where
+    T: Eq + Hash,
+{
+    #[inline]
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for item in iter {
+            self.insert(item);
+        }
+    }
+}
+
+impl<'a, T> Extend<&'a T> for LinkedSet<T>
+where
+    T: 'a + Eq + Hash + Copy,
+{
+    #[inline]
+    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
+        self.extend(iter.into_iter().cloned());
+    }
+}
+
+impl<T> FromIterator<T> for LinkedSet<T>
+where
+    T: Eq + Hash,
+{
+    #[inline]
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut ls = LinkedSet::new();
+        ls.extend(iter);
+        ls
+    }
+}
+
+impl<T, const N: usize> From<[T; N]> for LinkedSet<T>
+where
+    T: Eq + Hash,
+{
+    fn from(arr: [T; N]) -> Self {
+        Self::from_iter(arr)
+    }
+}
+
+pub struct Intersection<'a, T: 'a> {
+    iter: Iter<'a, T>,
+    other: &'a LinkedSet<T>,
+}
+
+pub struct Difference<'a, T: 'a> {
+    iter: Iter<'a, T>,
+    other: &'a LinkedSet<T>,
+}
+
+pub struct SymmetricDifference<'a, T: 'a> {
+    iter: Chain<Difference<'a, T>, Difference<'a, T>>,
+}
+
+pub struct Union<'a, T: 'a> {
+    iter: Chain<Iter<'a, T>, Difference<'a, T>>,
+}
+
+impl<T> Clone for Intersection<'_, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            iter: self.iter.clone(),
+            ..*self
+        }
+    }
+}
+
+impl<'a, T> Iterator for Intersection<'a, T>
+where
+    T: Eq + Hash,
+{
+    type Item = &'a T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let next = self.iter.next()?;
+            if self.other.contains(next) {
+                return Some(next);
+            }
+        }
+    }
+
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        Self: Sized,
+        F: FnMut(B, Self::Item) -> B,
+    {
+        self.iter.fold(init, |acc, elt| {
+            if self.other.contains(elt) {
+                f(acc, elt)
+            } else {
+                acc
+            }
+        })
+    }
+}
+
+impl<T> Clone for Difference<'_, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            iter: self.iter.clone(),
+            ..*self
+        }
+    }
+}
+
+impl<'a, T> Iterator for Difference<'a, T>
+where
+    T: Eq + Hash,
+{
+    type Item = &'a T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let next = self.iter.next()?;
+            if !self.other.contains(next) {
+                return Some(next);
+            }
+        }
+    }
+
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        Self: Sized,
+        F: FnMut(B, Self::Item) -> B,
+    {
+        self.iter.fold(init, |acc, elt| {
+            if self.other.contains(elt) {
+                acc
+            } else {
+                f(acc, elt)
+            }
+        })
+    }
+}
+
+impl<T> Clone for SymmetricDifference<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            iter: self.iter.clone(),
+        }
+    }
+}
+
+impl<'a, T> Iterator for SymmetricDifference<'a, T>
+where
+    T: Eq + Hash,
+{
+    type Item = &'a T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+
+    #[inline]
+    fn fold<B, F>(self, init: B, f: F) -> B
+    where
+        Self: Sized,
+        F: FnMut(B, Self::Item) -> B,
+    {
+        self.iter.fold(init, f)
+    }
+}
+
+impl<T> Clone for Union<'_, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            iter: self.iter.clone(),
+        }
+    }
+}
+
+impl<'a, T> Iterator for Union<'a, T>
+where
+    T: Eq + Hash,
+{
+    type Item = &'a T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.iter.count()
+    }
+
+    #[inline]
+    fn fold<B, F>(self, init: B, f: F) -> B
+    where
+        Self: Sized,
+        F: FnMut(B, Self::Item) -> B,
+    {
+        self.iter.fold(init, f)
+    }
+}
+
+// TODO: IntoIterator
 
 #[cfg(test)]
 mod toblerone_test {
@@ -455,6 +794,16 @@ mod toblerone_test {
 
         let tail = ls.tail.as_ref().unwrap();
         assert_eq!(tail.value, 16);
+    }
+
+    #[test]
+    fn actually_is_a_set() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for _ in 0..10 {
+            ls.insert(1);
+        }
+
+        assert_eq!(ls.len(), 1);
     }
 
     #[test]
@@ -531,6 +880,8 @@ mod toblerone_test {
             ls.insert(i as i32);
         }
 
+        assert_eq!(ls.len(), 100_000);
+
         ls.clear();
         assert!(ls.head.is_none());
         assert!(ls.tail.is_none());
@@ -543,5 +894,58 @@ mod toblerone_test {
         assert_eq!(ls.head.unwrap().value, 100);
         assert!(ls.tail.is_some());
         assert_eq!(ls.tail.unwrap().value, 100);
+    }
+
+    #[test]
+    fn disjoint() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let mut b = LinkedSet::new();
+
+        assert!(a.is_disjoint(&b));
+        b.insert(4);
+        assert!(a.is_disjoint(&b));
+        b.insert(1);
+        assert_eq!(a.is_disjoint(&b), false);
+    }
+
+    #[test]
+    fn subset() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let mut b = LinkedSet::new();
+        assert!(b.is_subset(&a));
+        b.insert(2);
+        assert!(b.is_subset(&a));
+        b.insert(4);
+        assert_eq!(b.is_subset(&a), false);
+    }
+
+    #[test]
+    fn superset() {
+        let a = LinkedSet::from([1, 2]);
+        let mut b = LinkedSet::new();
+
+        assert_eq!(b.is_superset(&a), false);
+
+        b.insert(0);
+        b.insert(1);
+        assert_eq!(b.is_superset(&a), false);
+
+        b.insert(2);
+        assert!(b.is_superset(&a));
+    }
+
+    #[test]
+    fn difference() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+        for item in b.iter() {
+            println!("{item}");
+        }
+
+        // let diff: LinkedSet<_> = a.difference(&b).collect();
+        // assert_eq!(diff, [1].iter().collect());
+
+        // let diff: LinkedSet<_> = b.difference(&a).collect();
+        // assert_eq!(diff, [4].iter().collect());
     }
 }
