@@ -172,6 +172,10 @@ where
             let bucket = &self.buckets[bucket_idx];
             match bucket.slots[slot] {
                 Some(ref node) => {
+                    if &node.value != value {
+                        return None;
+                    }
+
                     return Some(&node.value);
                 }
                 None => None,
@@ -449,10 +453,6 @@ where
             }
             let bucket = &self.buckets[gidx as usize];
             let potentials = bucket.simd_hash_match(h2);
-            if potentials.is_empty() {
-                gidx += 1;
-                continue;
-            }
 
             for slot in potentials {
                 match bucket.slots[slot] {
