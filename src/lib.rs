@@ -40,14 +40,14 @@ impl<T> Node<T> {
 #[repr(C)]
 #[derive(Debug)]
 struct Bucket<T> {
-    meta: [u8; BUCKET_SIZE],
+    meta: Vec<u8>,
     slots: Vec<Link<T>>,
 }
 
 impl<T> Bucket<T> {
     pub fn new() -> Self {
         Self {
-            meta: [EMPTY; BUCKET_SIZE],
+            meta: vec![EMPTY; BUCKET_SIZE],
             slots: vec![None; BUCKET_SIZE],
         }
     }
@@ -138,63 +138,46 @@ where
         }
     }
 
-    // FIXME: This actually isn't a set, fix this
+    // FIXME: This doesn't work properly, hashing is off
     #[inline]
     pub fn insert(&mut self, value: T) -> bool {
         if self.should_resize() {
             self.resize();
         }
 
+        if self.contains(&value) {
+            assert!(false, "value is already present in array");
+            return false;
+        }
+
         let (h1, h2) = self.hash(&value);
         let node = Rc::new(Node::new(value));
-
-        let mut gidx = self.fast_mod(h1 as u32);
-        loop {
-            if gidx as usize == self.buckets.len() {
-                return false;
-            }
-
-            let bucket = &mut self.buckets[gidx as usize];
-            match bucket.simd_free_slot() {
-                Some(idx) => {
-                    bucket.meta[idx] = h2;
-                    bucket.slots[idx] = Some(Rc::clone(&node));
-                    self.add_node(Rc::clone(&node));
-                    self.size += 1;
-                    return true;
-                }
-                None => {
-                    gidx += 1;
-                }
-            }
+        if let Some((bucket_idx, slot)) = self.free_slot(h1) {
+            let bucket = &mut self.buckets[bucket_idx];
+            assert!(bucket.meta[slot] == EMPTY);
+            bucket.meta[slot] = h2;
+            bucket.slots[slot] = Some(Rc::clone(&node));
+            self.add_node(Rc::clone(&node));
+            self.size += 1;
+            return true;
+        } else {
+            false
         }
     }
 
     #[inline]
     pub fn get(&self, value: &T) -> Option<&T> {
         let (h1, h2) = self.hash(&value);
-        let mut gidx = self.fast_mod(h1 as u32);
-        loop {
-            if gidx as usize == self.buckets.len() {
-                return None;
-            }
-            let bucket = &self.buckets[gidx as usize];
-            let potentials = bucket.simd_hash_match(h2);
-            for slot in potentials {
-                match bucket.slots[slot] {
-                    Some(ref node) => {
-                        if &node.value != value {
-                            gidx += 1;
-                            continue;
-                        }
-
-                        return Some(&node.value);
-                    }
-                    None => {}
+        if let Some((bucket_idx, slot)) = self.find(h1, h2) {
+            let bucket = &self.buckets[bucket_idx];
+            match bucket.slots[slot] {
+                Some(ref node) => {
+                    return Some(&node.value);
                 }
+                None => None,
             }
-
-            gidx += 1;
+        } else {
+            None
         }
     }
 
@@ -432,6 +415,59 @@ where
 
         if let Some(prev_ptr) = prev.and_then(|weak_ref| Weak::upgrade(&weak_ref)) {
             *prev_ptr.next.borrow_mut() = next.clone();
+        }
+    }
+
+    #[inline]
+    fn free_slot(&self, h1: u64) -> Option<(usize, usize)> {
+        let mut gidx = self.fast_mod(h1 as u32) as usize;
+
+        loop {
+            if gidx >= self.buckets.len() {
+                return None;
+            }
+
+            let bucket = &self.buckets[gidx as usize];
+            match bucket.simd_free_slot() {
+                Some(idx) => {
+                    return Some((gidx, idx));
+                }
+
+                None => {
+                    gidx += 1;
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn find(&self, h1: u64, h2: u8) -> Option<(usize, usize)> {
+        let mut gidx = self.fast_mod(h1 as u32);
+        loop {
+            if gidx as usize >= self.buckets.len() {
+                return None;
+            }
+            let bucket = &self.buckets[gidx as usize];
+            let potentials = bucket.simd_hash_match(h2);
+            if potentials.is_empty() {
+                gidx += 1;
+                continue;
+            }
+
+            for slot in potentials {
+                match bucket.slots[slot] {
+                    Some(_) => {
+                        if bucket.meta[slot] != h2 {
+                            continue;
+                        }
+
+                        return Some((gidx as usize, slot));
+                    }
+                    None => {}
+                }
+            }
+
+            gidx += 1;
         }
     }
 
@@ -799,11 +835,19 @@ mod toblerone_test {
     #[test]
     fn actually_is_a_set() {
         let mut ls: LinkedSet<i32> = LinkedSet::new();
-        for _ in 0..10 {
+        for _ in 0..100_000 {
             ls.insert(1);
         }
 
         assert_eq!(ls.len(), 1);
+    }
+
+    #[test]
+    fn get_some_value() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..300_000 {
+            ls.insert(i);
+        }
     }
 
     #[test]
@@ -878,6 +922,7 @@ mod toblerone_test {
         let mut ls: LinkedSet<i32> = LinkedSet::new();
         for i in 0..100_000 {
             ls.insert(i as i32);
+            println!("{i}");
         }
 
         assert_eq!(ls.len(), 100_000);
@@ -932,20 +977,5 @@ mod toblerone_test {
 
         b.insert(2);
         assert!(b.is_superset(&a));
-    }
-
-    #[test]
-    fn difference() {
-        let a = LinkedSet::from([1, 2, 3]);
-        let b = LinkedSet::from([4, 2, 3, 4]);
-        for item in b.iter() {
-            println!("{item}");
-        }
-
-        // let diff: LinkedSet<_> = a.difference(&b).collect();
-        // assert_eq!(diff, [1].iter().collect());
-
-        // let diff: LinkedSet<_> = b.difference(&a).collect();
-        // assert_eq!(diff, [4].iter().collect());
     }
 }
