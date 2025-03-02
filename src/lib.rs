@@ -138,7 +138,6 @@ where
         }
     }
 
-    // FIXME: This doesn't work properly, hashing is off
     #[inline]
     pub fn insert(&mut self, value: T) -> bool {
         if self.should_resize() {
@@ -146,7 +145,6 @@ where
         }
 
         if self.contains(&value) {
-            assert!(false, "value is already present in array");
             return false;
         }
 
@@ -154,7 +152,7 @@ where
         let node = Rc::new(Node::new(value));
         if let Some((bucket_idx, slot)) = self.free_slot(h1) {
             let bucket = &mut self.buckets[bucket_idx];
-            assert!(bucket.meta[slot] == EMPTY);
+            assert!(bucket.meta[slot] == EMPTY || bucket.meta[slot] == TOMB);
             bucket.meta[slot] = h2;
             bucket.slots[slot] = Some(Rc::clone(&node));
             self.add_node(Rc::clone(&node));
@@ -485,7 +483,6 @@ where
 
         let mut new_list = Self::with_capacity(new_cap);
         new_list.buckets = Bucket::new_bucket_collection(new_cap);
-
         for mut bucket in self.buckets.drain(..) {
             for slot in bucket.slots.drain(..) {
                 match slot {
@@ -524,6 +521,8 @@ where
         ((hash as u64 * self.buckets.len() as u64 - 1) >> 32) as u32
     }
 }
+
+// TODO: I think Drop is needed cause the stack is overflowing
 
 impl<T> PartialEq for LinkedSet<T>
 where
