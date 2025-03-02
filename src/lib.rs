@@ -536,8 +536,6 @@ where
     }
 }
 
-// TODO: I think Drop is needed cause the stack is overflowing
-
 impl<T> PartialEq for LinkedSet<T>
 where
     T: Eq + Hash,
@@ -556,6 +554,10 @@ impl<T> Eq for LinkedSet<T> where T: Eq + Hash {}
 pub struct Iter<'a, T> {
     node: Option<Rc<Node<T>>>,
     _marker: PhantomData<&'a Node<T>>,
+}
+
+pub struct IntoIter<T> {
+    node: Option<Rc<Node<T>>>,
 }
 
 impl<'a, T> Iterator for Iter<'a, T> {
@@ -588,6 +590,26 @@ impl<'a, T> Iterator for Iter<'a, T> {
         }
 
         accum
+    }
+}
+
+impl<T> IntoIterator for LinkedSet<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        IntoIter {
+            node: self.head.take(),
+        }
+    }
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // TODO: Start here
+        None
     }
 }
 
@@ -1029,5 +1051,23 @@ mod toblerone_test {
 
         assert_eq!(diff1, diff2);
         assert_eq!(diff1, [1, 4].iter().collect());
+    }
+
+    #[test]
+    fn intersection() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+
+        let intersection: LinkedSet<_> = a.intersection(&b).collect();
+        assert_eq!(intersection, [2, 3].iter().collect());
+    }
+
+    #[test]
+    fn union() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+
+        let union: LinkedSet<_> = a.union(&b).collect();
+        assert_eq!(union, [1, 2, 3, 4].iter().collect());
     }
 }
