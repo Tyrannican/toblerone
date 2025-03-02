@@ -37,6 +37,20 @@ impl<T> Node<T> {
     }
 }
 
+impl<T> Drop for Node<T> {
+    fn drop(&mut self) {
+        let mut next = self.next.borrow_mut().take();
+
+        while let Some(next_node) = next {
+            if let Ok(next_inner) = Rc::try_unwrap(next_node) {
+                next = next_inner.next.borrow_mut().take();
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug)]
 struct Bucket<T> {
@@ -847,6 +861,10 @@ mod toblerone_test {
         for i in 0..300_000 {
             ls.insert(i);
         }
+
+        let item = ls.get(&123456);
+        assert!(item.is_some());
+        assert_eq!(*item.unwrap(), 123456);
     }
 
     #[test]
