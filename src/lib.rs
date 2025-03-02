@@ -995,4 +995,39 @@ mod toblerone_test {
         b.insert(2);
         assert!(b.is_superset(&a));
     }
+
+    #[test]
+    fn extend() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        ls.extend([1, 2, 3].iter());
+
+        assert_eq!(ls.len(), 3);
+        for (item, expected) in ls.iter().zip([1, 2, 3].iter()) {
+            assert_eq!(*item, *expected);
+        }
+    }
+
+    #[test]
+    fn difference() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+
+        let diff: LinkedSet<_> = a.difference(&b).collect();
+        assert_eq!(diff, [1].iter().collect());
+
+        let diff: LinkedSet<_> = b.difference(&a).collect();
+        assert_eq!(diff, [4].iter().collect());
+    }
+
+    #[test]
+    fn symmetric_difference() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+
+        let diff1: LinkedSet<_> = a.symmetric_difference(&b).collect();
+        let diff2: LinkedSet<_> = b.symmetric_difference(&a).collect();
+
+        assert_eq!(diff1, diff2);
+        assert_eq!(diff1, [1, 4].iter().collect());
+    }
 }
