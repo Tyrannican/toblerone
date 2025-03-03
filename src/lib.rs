@@ -557,7 +557,7 @@ pub struct Iter<'a, T> {
 }
 
 pub struct IntoIter<T> {
-    node: Option<Rc<Node<T>>>,
+    node: Option<Node<T>>,
 }
 
 impl<'a, T> Iterator for Iter<'a, T> {
@@ -598,8 +598,15 @@ impl<T> IntoIterator for LinkedSet<T> {
     type IntoIter = IntoIter<T>;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        IntoIter {
-            node: self.head.take(),
+        match self.head.take() {
+            Some(n) => {
+                let Ok(node) = Rc::try_unwrap(n) else {
+                    return IntoIter { node: None };
+                };
+
+                IntoIter { node: Some(node) }
+            }
+            None => IntoIter { node: None },
         }
     }
 }
@@ -608,8 +615,11 @@ impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // TODO: Start here
-        None
+        if let Some(node) = self.node.take() {
+            None
+        } else {
+            None
+        }
     }
 }
 
