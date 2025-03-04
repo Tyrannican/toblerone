@@ -22,7 +22,7 @@ type WeakLink<T> = Option<Weak<Node<T>>>;
 
 #[derive(Debug)]
 struct Node<T> {
-    pub value: T,
+    pub value: Option<T>,
     pub prev: RefCell<WeakLink<T>>,
     pub next: RefCell<Link<T>>,
 }
@@ -30,7 +30,7 @@ struct Node<T> {
 impl<T> Node<T> {
     pub fn new(value: T) -> Self {
         Self {
-            value,
+            value: Some(value),
             prev: RefCell::new(None),
             next: RefCell::new(None),
         }
@@ -184,11 +184,15 @@ where
             let bucket = &self.buckets[bucket_idx];
             match bucket.slots[slot] {
                 Some(ref node) => {
-                    if &node.value != value {
-                        return None;
+                    if let Some(n_value) = &node.value {
+                        if value != n_value {
+                            return None;
+                        }
+
+                        return Some(&n_value);
                     }
 
-                    return Some(&node.value);
+                    return None;
                 }
                 None => None,
             }
@@ -222,14 +226,16 @@ where
             'inner: for slot in potentials.iter() {
                 match bucket.slots[*slot] {
                     Some(ref node) => {
-                        if &node.value != value {
-                            gidx += 1;
-                            continue;
-                        }
+                        if let Some(n_value) = &node.value {
+                            if n_value != value {
+                                gidx += 1;
+                                continue;
+                            }
 
-                        found_node = Some(Rc::clone(&node));
-                        bucket.meta[*slot] = TOMB;
-                        break 'inner;
+                            found_node = Some(Rc::clone(&node));
+                            bucket.meta[*slot] = TOMB;
+                            break 'inner;
+                        }
                     }
                     None => {}
                 }
@@ -376,7 +382,7 @@ where
 
     #[inline]
     pub(crate) fn insert_with_node(&mut self, node: Rc<Node<T>>) {
-        let (h1, h2) = self.hash(&node.value);
+        let (h1, h2) = self.hash(&node.value.as_ref().unwrap());
         let mut gidx = self.fast_mod(h1 as u32);
 
         loop {
@@ -570,7 +576,10 @@ impl<'a, T> Iterator for Iter<'a, T> {
         // lifetime of it so is guaranteed to live that long.
         let inner = unsafe { &*Rc::as_ptr(node) };
         self.node = inner.next.borrow().as_ref().map(|n| Rc::clone(&n));
-        Some(&inner.value)
+        match &inner.value {
+            Some(value) => Some(value),
+            None => unreachable!("value is always set"),
+        }
     }
 
     #[inline]
@@ -615,8 +624,17 @@ impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(node) = self.node.take() {
-            None
+        if let Some(mut node) = self.node.take() {
+            let value = node.value.take();
+            let next_ref = node.next.borrow_mut().take();
+            if let Some(next) = next_ref {
+                match Rc::try_unwrap(next) {
+                    Ok(inner) => self.node = Some(inner),
+                    Err(_) => self.node = None,
+                }
+            }
+
+            value
         } else {
             None
         }
@@ -855,7 +873,7 @@ mod toblerone_test {
         assert!(ls.tail.is_some());
         assert_eq!(ls.len(), 1);
         let head = ls.head.as_ref().unwrap();
-        assert_eq!(head.value, 42);
+        assert_eq!(head.value, Some(42));
     }
 
     #[test]
@@ -871,10 +889,10 @@ mod toblerone_test {
         assert!(ls.head.is_some());
         assert!(ls.tail.is_some());
         let head = ls.head.as_ref().unwrap();
-        assert_eq!(head.value, 0);
+        assert_eq!(head.value, Some(0));
 
         let tail = ls.tail.as_ref().unwrap();
-        assert_eq!(tail.value, 16);
+        assert_eq!(tail.value, Some(16));
     }
 
     #[test]
@@ -912,6 +930,18 @@ mod toblerone_test {
     }
 
     #[test]
+    fn into_iterator() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..100 {
+            ls.insert(i);
+        }
+
+        for (item, check) in ls.into_iter().zip((0..100).into_iter()) {
+            assert_eq!(item, check);
+        }
+    }
+
+    #[test]
     fn remove_node_head() {
         let mut ls: LinkedSet<i32> = LinkedSet::new();
         for i in 0..20 {
@@ -920,10 +950,10 @@ mod toblerone_test {
 
         assert!(ls.remove(&0));
         let head = ls.head.take();
-        assert_eq!(head.unwrap().value, 1);
+        assert_eq!(head.unwrap().value, Some(1));
 
         let tail = ls.tail.take();
-        assert_eq!(tail.unwrap().value, 19);
+        assert_eq!(tail.unwrap().value, Some(19));
     }
 
     #[test]
@@ -936,10 +966,10 @@ mod toblerone_test {
         assert!(ls.remove(&19));
 
         let head = ls.head.take();
-        assert_eq!(head.unwrap().value, 0);
+        assert_eq!(head.unwrap().value, Some(0));
 
         let tail = ls.tail.take();
-        assert_eq!(tail.unwrap().value, 18);
+        assert_eq!(tail.unwrap().value, Some(18));
     }
 
     #[test]
@@ -985,9 +1015,9 @@ mod toblerone_test {
         assert_eq!(ls.len(), 1);
 
         assert!(ls.head.is_some());
-        assert_eq!(ls.head.unwrap().value, 100);
+        assert_eq!(ls.head.unwrap().value, Some(100));
         assert!(ls.tail.is_some());
-        assert_eq!(ls.tail.unwrap().value, 100);
+        assert_eq!(ls.tail.unwrap().value, Some(100));
     }
 
     #[test]
