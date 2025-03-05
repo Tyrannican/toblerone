@@ -1,9 +1,9 @@
 use std::{
-    cell::RefCell,
     hash::{DefaultHasher, Hash, Hasher},
     iter::Chain,
     marker::PhantomData,
-    rc::{Rc, Weak},
+    ptr::NonNull,
+    rc::Rc,
 };
 
 #[cfg(target_arch = "x86")]
@@ -17,36 +17,21 @@ const BUCKET_SIZE: usize = 16;
 const EMPTY: u8 = 0x80;
 const TOMB: u8 = 0xFE;
 
-type Link<T> = Option<Rc<Node<T>>>;
-type WeakLink<T> = Option<Weak<Node<T>>>;
+type Link<T> = Option<NonNull<Node<T>>>;
 
 #[derive(Debug)]
 struct Node<T> {
-    pub value: Option<T>,
-    pub prev: RefCell<WeakLink<T>>,
-    pub next: RefCell<Link<T>>,
+    pub value: Rc<T>,
+    pub prev: Option<NonNull<Node<T>>>,
+    pub next: Option<NonNull<Node<T>>>,
 }
 
 impl<T> Node<T> {
     pub fn new(value: T) -> Self {
         Self {
-            value: Some(value),
-            prev: RefCell::new(None),
-            next: RefCell::new(None),
-        }
-    }
-}
-
-impl<T> Drop for Node<T> {
-    fn drop(&mut self) {
-        let mut next = self.next.borrow_mut().take();
-
-        while let Some(next_node) = next {
-            if let Ok(next_inner) = Rc::try_unwrap(next_node) {
-                next = next_inner.next.borrow_mut().take();
-            } else {
-                break;
-            }
+            value: Rc::new(value),
+            prev: None,
+            next: None,
         }
     }
 }
@@ -55,7 +40,7 @@ impl<T> Drop for Node<T> {
 #[derive(Debug)]
 struct Bucket<T> {
     meta: Vec<u8>,
-    slots: Vec<Link<T>>,
+    slots: Vec<Option<Rc<T>>>,
 }
 
 impl<T> Bucket<T> {
@@ -163,13 +148,13 @@ where
         }
 
         let (h1, h2) = self.hash(&value);
-        let node = Rc::new(Node::new(value));
         if let Some((bucket_idx, slot)) = self.free_slot(h1) {
             let bucket = &mut self.buckets[bucket_idx];
             assert!(bucket.meta[slot] == EMPTY || bucket.meta[slot] == TOMB);
+            let node = Box::new(Node::new(value));
             bucket.meta[slot] = h2;
-            bucket.slots[slot] = Some(Rc::clone(&node));
-            self.add_node(Rc::clone(&node));
+            bucket.slots[slot] = Some(Rc::clone(&node.value));
+            self.add_node(node);
             self.size += 1;
             return true;
         } else {
@@ -178,21 +163,17 @@ where
     }
 
     #[inline]
-    pub fn get(&self, value: &T) -> Option<&T> {
+    pub fn get<'a>(&self, value: &'a T) -> Option<&'a T> {
         let (h1, h2) = self.hash(&value);
         if let Some((bucket_idx, slot)) = self.find(h1, h2) {
             let bucket = &self.buckets[bucket_idx];
             match bucket.slots[slot] {
-                Some(ref node) => {
-                    if let Some(n_value) = &node.value {
-                        if value != n_value {
-                            return None;
-                        }
-
-                        return Some(&n_value);
+                Some(ref slot_value) => {
+                    if slot_value.as_ref() != value {
+                        return None;
                     }
 
-                    return None;
+                    return Some(value);
                 }
                 None => None,
             }
@@ -222,29 +203,32 @@ where
 
             let bucket = &mut self.buckets[gidx as usize];
             let potentials = bucket.simd_hash_match(h2);
-            let mut found_node: Option<Rc<Node<T>>> = None;
+            let mut found = false;
             'inner: for slot in potentials.iter() {
                 match bucket.slots[*slot] {
-                    Some(ref node) => {
-                        if let Some(n_value) = &node.value {
-                            if n_value != value {
-                                gidx += 1;
-                                continue;
-                            }
-
-                            found_node = Some(Rc::clone(&node));
-                            bucket.meta[*slot] = TOMB;
-                            break 'inner;
+                    Some(ref slot_value) => {
+                        if slot_value.as_ref() != value {
+                            gidx += 1;
+                            continue;
                         }
+
+                        found = true;
+                        bucket.meta[*slot] = TOMB;
+                        break 'inner;
                     }
                     None => {}
                 }
             }
 
-            if let Some(node) = found_node {
-                self.remove_node(node);
-                self.size -= 1;
-                return true;
+            if found {
+                match self.find_node(value) {
+                    Some(node) => {
+                        self.remove_node(node);
+                        self.size -= 1;
+                        return true;
+                    }
+                    None => unreachable!("if the found flag is set then the node has to exist"),
+                }
             }
 
             gidx += 1;
@@ -351,13 +335,8 @@ where
 
     #[inline]
     pub fn iter(&self) -> Iter<'_, T> {
-        let head = match self.head {
-            Some(ref node) => Some(Rc::clone(&node)),
-            None => None,
-        };
-
         Iter {
-            node: head,
+            node: self.head,
             _marker: std::marker::PhantomData,
         }
     }
@@ -368,29 +347,32 @@ where
     }
 
     #[inline]
-    fn add_node(&mut self, node: Rc<Node<T>>) {
+    fn add_node(&mut self, node: Box<Node<T>>) {
+        let node = NonNull::new(Box::leak(node));
         if self.head.is_none() {
-            self.head = Some(Rc::clone(&node));
-            self.tail = Some(node);
+            self.head = node;
+            self.tail = node;
         } else {
             let tail = self.tail.take().expect("if head is set then so is tail");
-            *tail.next.borrow_mut() = Some(Rc::clone(&node));
-            *node.prev.borrow_mut() = Some(Rc::downgrade(&tail));
-            self.tail = Some(node);
+            unsafe {
+                (*tail.as_ptr()).next = node;
+                (*node.expect("this is guaranteed to be non-null").as_ptr()).prev = Some(tail);
+            }
+
+            self.tail = node;
         }
     }
 
     #[inline]
-    pub(crate) fn insert_with_node(&mut self, node: Rc<Node<T>>) {
-        let (h1, h2) = self.hash(&node.value.as_ref().unwrap());
+    pub(crate) fn insert_rc(&mut self, value: Rc<T>) {
+        let (h1, h2) = self.hash(&value);
         let mut gidx = self.fast_mod(h1 as u32);
 
         loop {
             let bucket = &mut self.buckets[gidx as usize];
             match bucket.simd_free_slot() {
                 Some(idx) => {
-                    let bucket_node = Rc::clone(&node);
-                    bucket.slots[idx] = Some(bucket_node);
+                    bucket.slots[idx] = Some(value);
                     bucket.meta[idx] = h2;
                     self.size += 1;
                     return;
@@ -404,39 +386,36 @@ where
     }
 
     #[inline]
-    fn remove_node(&mut self, node: Rc<Node<T>>) {
-        // If the node is the head
-        if self.head.as_mut().unwrap().value == node.value {
-            let next = node.next.borrow_mut().take();
-            if let Some(ref n) = next {
-                n.prev.borrow_mut().take();
+    fn remove_node(&mut self, node: NonNull<Node<T>>) {
+        // If the value is the head
+        let node = unsafe { &*node.as_ptr() };
+        if let Some(head) = self.head {
+            let h_inner = unsafe { &*head.as_ptr() };
+            if h_inner.value == node.value {
+                self.head = node.next;
+                return;
             }
-            self.head = next;
-
-            return;
         }
 
         // If the node is the tail
-        if self.tail.as_mut().unwrap().value == node.value {
-            let prev = node.prev.borrow_mut().take();
-            assert!(prev.is_some());
-            self.tail = Weak::upgrade(&prev.unwrap());
-            *self.tail.as_mut().unwrap().next.borrow_mut() = None;
-            return;
+        if let Some(tail) = self.tail {
+            let t_inner = unsafe { &*tail.as_ptr() };
+            if t_inner.value == node.value {
+                self.tail = node.prev;
+                return;
+            }
         }
 
-        // If the node is the middle
-        let next = node.next.borrow_mut().take();
-        let prev = node.prev.borrow_mut().take();
+        // Node is in the middle
+        let next = node.next;
+        let prev = node.prev;
+
         assert!(next.is_some());
         assert!(prev.is_some());
 
-        if let Some(next_ptr) = next.as_ref().and_then(|n| Some(n.clone())) {
-            *next_ptr.prev.borrow_mut() = prev.clone();
-        }
-
-        if let Some(prev_ptr) = prev.and_then(|weak_ref| Weak::upgrade(&weak_ref)) {
-            *prev_ptr.next.borrow_mut() = next.clone();
+        unsafe {
+            (*prev.unwrap().as_ptr()).next = next;
+            (*next.unwrap().as_ptr()).prev = prev;
         }
     }
 
@@ -507,23 +486,31 @@ where
             for slot in bucket.slots.drain(..) {
                 match slot {
                     Some(n) => {
-                        new_list.insert_with_node(n);
+                        new_list.insert_rc(n);
                     }
                     None => {}
                 }
             }
         }
 
-        if let Some(head) = &self.head {
-            new_list.head = Some(Rc::clone(&head));
-            new_list.tail = Some(Rc::clone(
-                &self
-                    .tail
-                    .as_ref()
-                    .expect("head is set which means tail is set"),
-            ));
-        }
+        new_list.head = self.head;
+        new_list.tail = self.tail;
         *self = new_list;
+    }
+
+    #[inline]
+    fn find_node(&self, value: &T) -> Option<NonNull<Node<T>>> {
+        let mut curr = self.head;
+        while let Some(node) = curr {
+            let inner = unsafe { &*node.as_ptr() };
+            if inner.value.as_ref() == value {
+                return Some(node);
+            }
+
+            curr = inner.next;
+        }
+
+        None
     }
 
     #[inline]
@@ -558,12 +545,12 @@ where
 impl<T> Eq for LinkedSet<T> where T: Eq + Hash {}
 
 pub struct Iter<'a, T> {
-    node: Option<Rc<Node<T>>>,
+    node: Option<NonNull<Node<T>>>,
     _marker: PhantomData<&'a Node<T>>,
 }
 
 pub struct IntoIter<T> {
-    node: Option<Node<T>>,
+    node: Option<NonNull<Node<T>>>,
 }
 
 impl<'a, T> Iterator for Iter<'a, T> {
@@ -571,15 +558,12 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let node = self.node.as_ref()?;
+        let node = self.node?;
         // Safety: The pointer is held by the LinkedSet and this iterator is bound to the
         // lifetime of it so is guaranteed to live that long.
-        let inner = unsafe { &*Rc::as_ptr(node) };
-        self.node = inner.next.borrow().as_ref().map(|n| Rc::clone(&n));
-        match &inner.value {
-            Some(value) => Some(value),
-            None => unreachable!("value is always set"),
-        }
+        let inner = unsafe { &*node.as_ptr() };
+        self.node = inner.next;
+        Some(&inner.value)
     }
 
     #[inline]
@@ -608,13 +592,7 @@ impl<T> IntoIterator for LinkedSet<T> {
 
     fn into_iter(mut self) -> Self::IntoIter {
         match self.head.take() {
-            Some(n) => {
-                let Ok(node) = Rc::try_unwrap(n) else {
-                    return IntoIter { node: None };
-                };
-
-                IntoIter { node: Some(node) }
-            }
+            Some(n) => IntoIter { node: Some(n) },
             None => IntoIter { node: None },
         }
     }
@@ -624,17 +602,14 @@ impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(mut node) = self.node.take() {
-            let value = node.value.take();
-            let next_ref = node.next.borrow_mut().take();
-            if let Some(next) = next_ref {
-                match Rc::try_unwrap(next) {
-                    Ok(inner) => self.node = Some(inner),
-                    Err(_) => self.node = None,
-                }
-            }
+        if let Some(node) = self.node.take() {
+            let inner = unsafe { &*node.as_ptr() };
+            self.node = inner.next;
 
-            value
+            match Rc::try_unwrap(Rc::clone(&inner.value)) {
+                Ok(v) => Some(v),
+                Err(_) => None,
+            }
         } else {
             None
         }
@@ -859,8 +834,6 @@ where
     }
 }
 
-// TODO: IntoIterator
-
 #[cfg(test)]
 mod toblerone_test {
     use super::*;
@@ -872,8 +845,10 @@ mod toblerone_test {
         assert!(ls.head.is_some());
         assert!(ls.tail.is_some());
         assert_eq!(ls.len(), 1);
-        let head = ls.head.as_ref().unwrap();
-        assert_eq!(head.value, Some(42));
+        unsafe {
+            let head = &*ls.head.unwrap().as_ptr();
+            assert_eq!(*head.value, 42);
+        }
     }
 
     #[test]
@@ -888,11 +863,12 @@ mod toblerone_test {
         assert_eq!(ls.capacity, 32);
         assert!(ls.head.is_some());
         assert!(ls.tail.is_some());
-        let head = ls.head.as_ref().unwrap();
-        assert_eq!(head.value, Some(0));
-
-        let tail = ls.tail.as_ref().unwrap();
-        assert_eq!(tail.value, Some(16));
+        unsafe {
+            let head = &*ls.head.unwrap().as_ptr();
+            assert_eq!(*head.value, 0);
+            let tail = &*ls.tail.unwrap().as_ptr();
+            assert_eq!(*tail.value, 16);
+        }
     }
 
     #[test]
@@ -949,11 +925,13 @@ mod toblerone_test {
         }
 
         assert!(ls.remove(&0));
-        let head = ls.head.take();
-        assert_eq!(head.unwrap().value, Some(1));
+        unsafe {
+            let head = &*ls.head.unwrap().as_ptr();
+            assert_eq!(*head.value, 1);
 
-        let tail = ls.tail.take();
-        assert_eq!(tail.unwrap().value, Some(19));
+            let tail = &*ls.tail.unwrap().as_ptr();
+            assert_eq!(*tail.value, 19);
+        }
     }
 
     #[test]
@@ -965,11 +943,13 @@ mod toblerone_test {
 
         assert!(ls.remove(&19));
 
-        let head = ls.head.take();
-        assert_eq!(head.unwrap().value, Some(0));
+        unsafe {
+            let head = &*ls.head.unwrap().as_ptr();
+            assert_eq!(*head.value, 0);
 
-        let tail = ls.tail.take();
-        assert_eq!(tail.unwrap().value, Some(18));
+            let tail = &*ls.tail.unwrap().as_ptr();
+            assert_eq!(*tail.value, 18);
+        }
     }
 
     #[test]
@@ -1014,10 +994,15 @@ mod toblerone_test {
         ls.insert(100);
         assert_eq!(ls.len(), 1);
 
-        assert!(ls.head.is_some());
-        assert_eq!(ls.head.unwrap().value, Some(100));
-        assert!(ls.tail.is_some());
-        assert_eq!(ls.tail.unwrap().value, Some(100));
+        unsafe {
+            assert!(ls.head.is_some());
+            let head = &*ls.head.unwrap().as_ptr();
+            assert_eq!(*head.value, 100);
+
+            assert!(ls.tail.is_some());
+            let tail = &*ls.tail.unwrap().as_ptr();
+            assert_eq!(*tail.value, 100);
+        }
     }
 
     #[test]
