@@ -11,6 +11,8 @@ use core::arch::x86 as cpu;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64 as cpu;
 
+mod hs;
+
 const DEFAULT_CAPACITY: usize = 16;
 const BUCKET_SIZE: usize = 16;
 
