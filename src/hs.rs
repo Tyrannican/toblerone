@@ -2,6 +2,8 @@ use std::{
     collections::HashSet, hash::Hash, iter::Chain, marker::PhantomData, ptr::NonNull, rc::Rc,
 };
 
+// TODO: Impl Drain
+
 #[derive(Debug)]
 struct Node<T> {
     next: Option<NonNull<Node<T>>>,
