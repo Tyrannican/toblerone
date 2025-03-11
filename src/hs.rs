@@ -363,6 +363,34 @@ where
     }
 }
 
+// TODO: Cleanup and think about how to add a range and shit
+pub struct Drain<T> {
+    set: LinkedSet<T>,
+}
+
+impl<T> Iterator for Drain<T>
+where
+    T: Eq + Hash,
+{
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.set.head.take() {
+            Some(head) => {
+                let head = unsafe { &*head.as_ptr() };
+                match Rc::try_unwrap(head.value.clone()) {
+                    Ok(value) => {
+                        self.set.inner.remove(&value);
+                        self.set.head = head.next;
+                        return Some(value);
+                    }
+                    Err(_) => return None,
+                }
+            }
+            None => None,
+        }
+    }
+}
+
 pub struct Intersection<'a, T: 'a> {
     iter: Iter<'a, T>,
     other: &'a LinkedSet<T>,
