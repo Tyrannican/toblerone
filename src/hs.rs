@@ -1,5 +1,6 @@
 use std::{
-    collections::HashSet, hash::Hash, iter::Chain, marker::PhantomData, ptr::NonNull, rc::Rc,
+    borrow::Borrow, collections::HashSet, hash::Hash, iter::Chain, marker::PhantomData,
+    ptr::NonNull, rc::Rc,
 };
 
 #[derive(Debug)]
@@ -125,6 +126,28 @@ where
         Drain {
             set: self,
             _marker: std::marker::PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let to_remove = self
+            .inner
+            .iter()
+            .filter_map(|item| {
+                if !f(item) {
+                    return Some(Rc::clone(item));
+                }
+
+                None
+            })
+            .collect::<Vec<Rc<T>>>();
+
+        for item in to_remove {
+            self.remove(&item);
         }
     }
 
@@ -597,6 +620,12 @@ mod hs_tests {
     use super::*;
 
     #[test]
+    fn capacity() {
+        let ls: LinkedSet<i32> = LinkedSet::with_capacity(100);
+        assert!(ls.capacity() >= 100);
+    }
+
+    #[test]
     fn can_add_nodes() {
         let mut ls: LinkedSet<i32> = LinkedSet::new();
         for i in 0..100_000 {
@@ -653,6 +682,13 @@ mod hs_tests {
         for (item, check) in ls.into_iter().zip((0..100).into_iter()) {
             assert_eq!(item, check);
         }
+    }
+
+    #[test]
+    fn retain() {
+        let mut hs = LinkedSet::from([1, 2, 3, 4, 5, 6]);
+        hs.retain(|k| k % 2 == 0);
+        assert_eq!(hs, LinkedSet::from([2, 4, 6]));
     }
 
     #[test]
