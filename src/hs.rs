@@ -2,8 +2,6 @@ use std::{
     collections::HashSet, hash::Hash, iter::Chain, marker::PhantomData, ptr::NonNull, rc::Rc,
 };
 
-// TODO: Impl Drain
-
 #[derive(Debug)]
 struct Node<T> {
     next: Option<NonNull<Node<T>>>,
@@ -21,6 +19,7 @@ impl<T> Node<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct LinkedSet<T> {
     inner: HashSet<Rc<T>>,
     head: Option<NonNull<Node<T>>>,
@@ -35,6 +34,15 @@ where
     pub fn new() -> Self {
         Self {
             inner: HashSet::default(),
+            head: None,
+            tail: None,
+            size: 0,
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: HashSet::with_capacity(capacity),
             head: None,
             tail: None,
             size: 0,
@@ -101,12 +109,21 @@ where
         self.inner.clear();
         self.head = None;
         self.tail = None;
+        self.size = 0
     }
 
     #[inline]
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             node: self.head,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn drain(&mut self) -> Drain<'_, T> {
+        Drain {
+            set: self,
             _marker: std::marker::PhantomData,
         }
     }
@@ -239,6 +256,21 @@ where
     }
 }
 
+impl<T> PartialEq for LinkedSet<T>
+where
+    T: Eq + Hash,
+{
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        self.iter().all(|k| other.contains(k))
+    }
+}
+
+impl<T> Eq for LinkedSet<T> where T: Eq + Hash {}
+
 pub struct Iter<'a, T> {
     node: Option<NonNull<Node<T>>>,
     _marker: PhantomData<&'a Node<T>>,
@@ -298,10 +330,11 @@ impl<T> Iterator for IntoIter<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(node) = self.node.take() {
-            let inner = unsafe { &*node.as_ptr() };
+            // Safety: We just took ownership of it
+            let inner = unsafe { Box::from_raw(node.as_ptr()) };
             self.node = inner.next;
 
-            match Rc::try_unwrap(Rc::clone(&inner.value)) {
+            match Rc::try_unwrap(inner.value) {
                 Ok(v) => Some(v),
                 Err(_) => None,
             }
@@ -363,12 +396,12 @@ where
     }
 }
 
-// TODO: Cleanup and think about how to add a range and shit
-pub struct Drain<T> {
-    set: LinkedSet<T>,
+pub struct Drain<'a, T> {
+    set: &'a mut LinkedSet<T>,
+    _marker: PhantomData<&'a mut T>,
 }
 
-impl<T> Iterator for Drain<T>
+impl<'a, T> Iterator for Drain<'a, T>
 where
     T: Eq + Hash,
 {
@@ -376,14 +409,16 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         match self.set.head.take() {
             Some(head) => {
-                let head = unsafe { &*head.as_ptr() };
-                match Rc::try_unwrap(head.value.clone()) {
-                    Ok(value) => {
-                        self.set.inner.remove(&value);
+                // Safety: We just took ownership of it
+                let head = unsafe { Box::from_raw(head.as_ptr()) };
+                self.set.inner.remove(&head.value);
+                match Rc::into_inner(head.value) {
+                    Some(value) => {
                         self.set.head = head.next;
+                        self.set.size -= 1;
                         return Some(value);
                     }
-                    Err(_) => return None,
+                    None => None,
                 }
             }
             None => None,
@@ -569,5 +604,216 @@ mod hs_tests {
         }
 
         assert_eq!(ls.size, 100_000);
+    }
+
+    #[test]
+    fn get_a_value() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..300_000 {
+            ls.insert(i);
+        }
+
+        let item = ls.get(&123456);
+        assert!(item.is_some());
+        assert_eq!(item, Some(&123456));
+    }
+
+    #[test]
+    fn ordering() {
+        let mut ls = LinkedSet::from([1, 2, 3]);
+        for (item, n) in ls.iter().zip([1, 2, 3].iter()) {
+            assert_eq!(item, n);
+        }
+
+        ls.remove(&2);
+        for (item, n) in ls.iter().zip([1, 3].iter()) {
+            assert_eq!(item, n);
+        }
+    }
+
+    #[test]
+    fn iterator() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..17 {
+            ls.insert(i as i32);
+        }
+
+        for (item, expected) in ls.iter().zip((0..17).into_iter()) {
+            assert_eq!(*item, expected);
+        }
+    }
+
+    #[test]
+    fn into_iterator() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..100 {
+            ls.insert(i);
+        }
+
+        for (item, check) in ls.into_iter().zip((0..100).into_iter()) {
+            assert_eq!(item, check);
+        }
+    }
+
+    #[test]
+    fn remove_node_head() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..20 {
+            ls.insert(i as i32);
+        }
+
+        assert!(ls.remove(&0));
+        assert_eq!(ls.len(), 19);
+
+        unsafe {
+            let head = &*ls.head.unwrap().as_ptr();
+            assert_eq!(*head.value, 1);
+
+            let tail = &*ls.tail.unwrap().as_ptr();
+            assert_eq!(*tail.value, 19);
+        }
+    }
+
+    #[test]
+    fn remove_node_tail() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..20 {
+            ls.insert(i as i32);
+        }
+
+        assert!(ls.remove(&19));
+        assert_eq!(ls.len(), 19);
+
+        unsafe {
+            let head = &*ls.head.unwrap().as_ptr();
+            assert_eq!(*head.value, 0);
+
+            let tail = &*ls.tail.unwrap().as_ptr();
+            assert_eq!(*tail.value, 18);
+        }
+    }
+
+    #[test]
+    fn remove_node_middle() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..20 {
+            ls.insert(i as i32);
+        }
+
+        assert!(ls.remove(&14));
+        assert_eq!(ls.get(&14), None);
+    }
+
+    #[test]
+    fn clear() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        for i in 0..100_000 {
+            ls.insert(i as i32);
+        }
+
+        ls.clear();
+        assert!(ls.is_empty());
+        assert!(ls.head.is_none());
+        assert!(ls.tail.is_none());
+    }
+
+    #[test]
+    fn disjoint() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let mut b = LinkedSet::new();
+
+        assert!(a.is_disjoint(&b));
+        b.insert(4);
+        assert!(a.is_disjoint(&b));
+        b.insert(1);
+        assert_eq!(a.is_disjoint(&b), false);
+    }
+
+    #[test]
+    fn subset() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let mut b = LinkedSet::new();
+        assert!(b.is_subset(&a));
+        b.insert(2);
+        assert!(b.is_subset(&a));
+        b.insert(4);
+        assert_eq!(b.is_subset(&a), false);
+    }
+
+    #[test]
+    fn superset() {
+        let a = LinkedSet::from([1, 2]);
+        let mut b = LinkedSet::new();
+
+        assert_eq!(b.is_superset(&a), false);
+
+        b.insert(0);
+        b.insert(1);
+        assert_eq!(b.is_superset(&a), false);
+
+        b.insert(2);
+        assert!(b.is_superset(&a));
+    }
+
+    #[test]
+    fn extend() {
+        let mut ls: LinkedSet<i32> = LinkedSet::new();
+        ls.extend([1, 2, 3].iter());
+
+        assert_eq!(ls.len(), 3);
+        for (item, expected) in ls.iter().zip([1, 2, 3].iter()) {
+            assert_eq!(*item, *expected);
+        }
+    }
+
+    #[test]
+    fn difference() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+
+        let diff: LinkedSet<_> = a.difference(&b).collect();
+        assert_eq!(diff, [1].iter().collect());
+
+        let diff: LinkedSet<_> = b.difference(&a).collect();
+        assert_eq!(diff, [4].iter().collect());
+    }
+
+    #[test]
+    fn symmetric_difference() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+
+        let diff1: LinkedSet<_> = a.symmetric_difference(&b).collect();
+        let diff2: LinkedSet<_> = b.symmetric_difference(&a).collect();
+
+        assert_eq!(diff1, diff2);
+        assert_eq!(diff1, [1, 4].iter().collect());
+    }
+
+    #[test]
+    fn intersection() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+
+        let intersection: LinkedSet<_> = a.intersection(&b).collect();
+        assert_eq!(intersection, [2, 3].iter().collect());
+    }
+
+    #[test]
+    fn union() {
+        let a = LinkedSet::from([1, 2, 3]);
+        let b = LinkedSet::from([4, 2, 3, 4]);
+
+        let union: LinkedSet<_> = a.union(&b).collect();
+        assert_eq!(union, [1, 2, 3, 4].iter().collect());
+    }
+
+    #[test]
+    fn drain() {
+        let mut ls = LinkedSet::from([1, 2, 3]);
+        assert!(!ls.is_empty());
+
+        for _ in ls.drain() {}
+        assert!(ls.is_empty());
     }
 }
