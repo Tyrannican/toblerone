@@ -1,6 +1,5 @@
 use std::{
-    borrow::Borrow, collections::HashSet, hash::Hash, iter::Chain, marker::PhantomData,
-    ptr::NonNull, rc::Rc,
+    collections::HashSet, hash::Hash, iter::Chain, marker::PhantomData, ptr::NonNull, rc::Rc,
 };
 
 #[derive(Debug)]
