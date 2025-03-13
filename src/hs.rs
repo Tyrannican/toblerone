@@ -1,5 +1,10 @@
 use std::{
-    collections::HashSet, hash::Hash, iter::Chain, marker::PhantomData, ptr::NonNull, rc::Rc,
+    collections::{HashSet, TryReserveError},
+    hash::Hash,
+    iter::Chain,
+    marker::PhantomData,
+    ptr::NonNull,
+    rc::Rc,
 };
 
 #[derive(Debug)]
@@ -110,6 +115,77 @@ where
         self.head = None;
         self.tail = None;
         self.size = 0
+    }
+
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        self.inner.shrink_to_fit();
+    }
+
+    #[inline]
+    pub fn shrink_to(&mut self, min_capacity: usize) {
+        self.inner.shrink_to(min_capacity);
+    }
+
+    #[inline]
+    pub fn replace(&mut self, value: T) -> Option<T> {
+        if !self.contains(&value) {
+            self.insert(value);
+            return None;
+        }
+
+        // Fugly AF
+        let mut curr = self.head;
+        while let Some(curr_node) = curr {
+            let n_inner = unsafe { &*curr_node.as_ptr() };
+            if *n_inner.value == value {
+                let new_node = NonNull::new(Box::leak(Box::new(Node::new(value))));
+                unsafe {
+                    let node = &mut *new_node.unwrap().as_mut();
+                    node.prev = n_inner.prev;
+                    node.next = n_inner.next;
+                    if let Some(mut prev) = n_inner.prev {
+                        let p_inner = &mut *prev.as_mut();
+                        let _ = std::mem::replace(&mut node.prev, n_inner.prev);
+                        let _ = std::mem::replace(&mut p_inner.next, new_node);
+                    }
+
+                    if let Some(mut next) = n_inner.next {
+                        let next_inner = &mut *next.as_mut();
+                        let _ = std::mem::replace(&mut node.next, n_inner.next);
+                        let _ = std::mem::replace(&mut next_inner.prev, new_node);
+                    }
+                }
+
+                if curr == self.head {
+                    self.head = new_node;
+                }
+                if curr == self.tail {
+                    self.tail = new_node;
+                }
+
+                self.inner.remove(&n_inner.value);
+                let ptr = unsafe { Box::from_raw(curr_node.as_ptr()) };
+                return Rc::into_inner(ptr.value);
+            }
+            curr = n_inner.next;
+        }
+
+        None
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        todo!()
+    }
+
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        todo!()
+    }
+
+    #[inline]
+    pub fn take(&mut self, value: &T) {
+        todo!()
     }
 
     #[inline]
@@ -750,6 +826,33 @@ mod hs_tests {
         assert!(ls.is_empty());
         assert!(ls.head.is_none());
         assert!(ls.tail.is_none());
+    }
+
+    #[test]
+    fn replace() {
+        todo!()
+    }
+
+    #[test]
+    fn shrink_to_fit() {
+        let mut ls: LinkedSet<i32> = LinkedSet::with_capacity(100);
+        ls.insert(1);
+        ls.insert(2);
+        assert!(ls.capacity() >= 100);
+        ls.shrink_to_fit();
+        assert!(ls.capacity() >= 2);
+    }
+
+    #[test]
+    fn shrink_to() {
+        let mut ls: LinkedSet<i32> = LinkedSet::with_capacity(100);
+        ls.insert(1);
+        ls.insert(2);
+        assert!(ls.capacity() >= 100);
+        ls.shrink_to(10);
+        assert!(ls.capacity() >= 10);
+        ls.shrink_to(0);
+        assert!(ls.capacity() >= 2);
     }
 
     #[test]
