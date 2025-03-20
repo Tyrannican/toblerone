@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     collections::{HashSet, TryReserveError},
     hash::Hash,
     iter::Chain,
@@ -7,19 +8,68 @@ use std::{
     rc::Rc,
 };
 
+#[derive(Eq, PartialEq, Hash, Debug)]
+struct InnerValue<T> {
+    value: Rc<T>,
+}
+
+impl<T> InnerValue<T>
+where
+    T: Eq + Hash,
+{
+    pub fn new(value: T) -> Self {
+        Self {
+            value: Rc::new(value),
+        }
+    }
+
+    pub fn consume(self) -> Option<T> {
+        Rc::into_inner(self.value)
+    }
+}
+
+impl<T> AsRef<T> for InnerValue<T> {
+    fn as_ref(&self) -> &T {
+        self.value.as_ref()
+    }
+}
+
+impl<T> Borrow<T> for InnerValue<T>
+where
+    T: Eq + Hash,
+{
+    fn borrow(&self) -> &T {
+        self.value.as_ref()
+    }
+}
+
+impl<T> Clone for InnerValue<T>
+where
+    T: Eq + Hash,
+{
+    fn clone(&self) -> Self {
+        Self {
+            value: Rc::clone(&self.value),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Node<T> {
     next: Option<NonNull<Node<T>>>,
     prev: Option<NonNull<Node<T>>>,
-    value: Rc<T>,
+    value: InnerValue<T>,
 }
 
-impl<T> Node<T> {
+impl<T> Node<T>
+where
+    T: Eq + Hash,
+{
     pub fn new(value: T) -> Self {
         Self {
             next: None,
             prev: None,
-            value: Rc::new(value),
+            value: InnerValue::new(value),
         }
     }
 }
@@ -99,7 +149,7 @@ impl<T> Node<T> {
 /// ```
 #[derive(Debug)]
 pub struct LinkedSet<T> {
-    inner: HashSet<Rc<T>>,
+    inner: HashSet<InnerValue<T>>,
     head: Option<NonNull<Node<T>>>,
     tail: Option<NonNull<Node<T>>>,
     size: usize,
@@ -178,7 +228,7 @@ where
         }
 
         let node = Box::new(Node::new(value));
-        self.inner.insert(Rc::clone(&node.value));
+        self.inner.insert(node.value.clone());
         self.add_node(node);
         self.size += 1;
 
@@ -446,7 +496,7 @@ where
         while let Some(mut curr_node) = curr {
             // Safety: The node is guaranteed to exist here
             let n_inner = unsafe { &mut *curr_node.as_mut() };
-            if &*n_inner.value != value {
+            if &*n_inner.value.as_ref() != value {
                 curr = n_inner.next;
                 continue;
             }
@@ -467,7 +517,7 @@ where
 
                 self.size -= 1;
                 let ptr = Box::from_raw(curr_node.as_ptr());
-                return Rc::into_inner(ptr.value);
+                return ptr.value.consume();
             }
         }
 
@@ -557,16 +607,16 @@ where
             .inner
             .iter()
             .filter_map(|item| {
-                if !f(item) {
-                    return Some(Rc::clone(item));
+                if !f(item.as_ref()) {
+                    return Some(item.clone());
                 }
 
                 None
             })
-            .collect::<Vec<Rc<T>>>();
+            .collect::<Vec<InnerValue<T>>>();
 
         for item in to_remove {
-            self.remove(&item);
+            self.remove(&item.as_ref());
         }
     }
 
@@ -909,7 +959,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
         // lifetime of it so is guaranteed to live that long.
         let inner = unsafe { &*node.as_ptr() };
         self.node = inner.next;
-        Some(&inner.value)
+        Some(inner.value.as_ref())
     }
 
     #[inline]
@@ -932,7 +982,10 @@ impl<'a, T> Iterator for Iter<'a, T> {
     }
 }
 
-impl<T> IntoIterator for LinkedSet<T> {
+impl<T> IntoIterator for LinkedSet<T>
+where
+    T: Eq + Hash,
+{
     type Item = T;
     type IntoIter = IntoIter<T>;
 
@@ -944,7 +997,10 @@ impl<T> IntoIterator for LinkedSet<T> {
     }
 }
 
-impl<T> Iterator for IntoIter<T> {
+impl<T> Iterator for IntoIter<T>
+where
+    T: Eq + Hash,
+{
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -953,10 +1009,7 @@ impl<T> Iterator for IntoIter<T> {
             let inner = unsafe { Box::from_raw(node.as_ptr()) };
             self.node = inner.next;
 
-            match Rc::try_unwrap(inner.value) {
-                Ok(v) => Some(v),
-                Err(_) => None,
-            }
+            inner.value.consume()
         } else {
             None
         }
@@ -1047,7 +1100,7 @@ where
                 // Safety: We just took ownership of it
                 let head = unsafe { Box::from_raw(head.as_ptr()) };
                 self.set.inner.remove(&head.value);
-                match Rc::into_inner(head.value) {
+                match head.value.consume() {
                     Some(value) => {
                         self.set.head = head.next;
                         self.set.size -= 1;
@@ -1383,10 +1436,10 @@ mod hs_tests {
 
         unsafe {
             let head = &*ls.head.unwrap().as_ptr();
-            assert_eq!(*head.value, 1);
+            assert_eq!(head.value.as_ref(), &1);
 
             let tail = &*ls.tail.unwrap().as_ptr();
-            assert_eq!(*tail.value, 19);
+            assert_eq!(tail.value.as_ref(), &19);
         }
     }
 
@@ -1402,10 +1455,10 @@ mod hs_tests {
 
         unsafe {
             let head = &*ls.head.unwrap().as_ptr();
-            assert_eq!(*head.value, 0);
+            assert_eq!(head.value.as_ref(), &0);
 
             let tail = &*ls.tail.unwrap().as_ptr();
-            assert_eq!(*tail.value, 18);
+            assert_eq!(tail.value.as_ref(), &18);
         }
     }
 
